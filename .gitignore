@@ -1,0 +1,6 @@
+/.bsp/
+.DS_Store
+actors/.DS_Store
+target/
+.vscode/
+target
