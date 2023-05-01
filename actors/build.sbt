@@ -8,6 +8,7 @@ lazy val root = (project in file("."))
   .settings(
     name := "scalaQ-psi-collapse",
     libraryDependencies ++= Seq(
+      Libraries.logback,
       Libraries.akka,
       Libraries.akkaTestkit
     )
