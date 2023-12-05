@@ -10,24 +10,11 @@ import fs2._
 import cats.effect.IO
 import scala.util.control.NoStackTrace
 import cats.Eval
-
 import cats.effect.unsafe.implicits.global
-
-trait Gate 
-case object X extends Gate 
-case class H(ctrl: Int) extends Gate 
-case class CX(ctrl: Int, target: Int) extends Gate
-case class U(target: Int, power:Int) extends Gate
-case class Swap(q1: Int, q2: Int) extends Gate
-case class Measure(q: Int) extends Gate
-
-final case class InvalidCircuitError(m: String) extends NoStackTrace
-final case class Circuit(remainingGates: List[Gate]) 
-final case class QVec(prop: Complex[Double], v: Vector[Boolean], name: String ="")
-
-sealed trait Sampler{
-    def sample() : Vector[Boolean]
-}
+import com.sinanspd.qure.circuit._
+import com.sinanspd.qure.circuit.gates._
+import com.sinanspd.qure.circuit.circuitError._
+import com.sinanspd.qure.circuit.sampler._
 
 class FakeSimonSampler(c: Circuit) extends Sampler {
         val s = getRandomStateSpace()
