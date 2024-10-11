@@ -3,9 +3,6 @@ package example2
 import io.chymyst.jc._
 import org.slf4j.LoggerFactory
 import scala.util.Random
-import scala.math._
-import spire.math._
-import spire.implicits._ 
 import scala.util.control.NoStackTrace
 import fs2._
 import cats.effect.IO
@@ -17,6 +14,8 @@ import com.sinanspd.qure.circuit.circuitError._
 import com.sinanspd.qure.circuit.sampler._
 import com.sinanspd.qure.circuit.sampler.BasicSampler
 import cats.instances.int
+import spire.math._
+import spire.implicits._ 
 
 //Fully Cham implementation 
 object Cham2 extends App {
@@ -28,8 +27,8 @@ object Cham2 extends App {
     val hScale : Double = 1.0 / Math.sqrt(2.0)
     val decider = new Random()
 
-    val i = m[QVec]
-    val e = m[(QVec, Circuit)]
+    val terminate = m[QVec]
+    val commit = m[(QVec, Circuit, String)]
     val step = m[Unit]
     var med = false
 
@@ -71,7 +70,7 @@ object Cham2 extends App {
     case class DeferredMeasurement(q: Int) extends Gate 
 
     site (
-        go { case i(a) + i(b) ⇒ { //two intermediate results ready to interfere 
+        go { case terminate(a) + terminate(b) ⇒ { //two intermediate results ready to interfere 
                 logger.debug(s"Possible Reaction between $a and $b"); 
                 if(a.v.sameElements(b.v)){ 
                     logger.debug("Molecules compatible. Reaction starting")
@@ -86,57 +85,82 @@ object Cham2 extends App {
                         logger.debug("Destrictive Interference")
                     }else{
                         logger.debug(s"Reaction finished, releasesing $newQ into the solution")
-                        i(newQ)
+                        terminate(newQ)
                     }
                 }else{
                     logger.debug("Incompatible molecules. Returning molecules to the pool")
-                    i(a) + i(b)
+                    terminate(a) + terminate(b)
+                }
+            }
+        },
+        go { //local progress 
+            case commit(a) + step(()) ⇒ {
+                if(a._2.remainingGates.length == 1){ //whatever we release here will be ready for interference
+                    applyGate(a._2.remainingGates, a._1, true, a._3)
+                }else{
+                    applyGate(a._2.remainingGates, a._1, false, a._3)
                 }
             }
         },
         go {
-            case e(a) + step(()) ⇒ {
-                if(a._2.remainingGates.length == 1){ //whatever we release here will be ready for interference
-                    val v = a._1
-                    applyGate(a._2.remainingGates, v, true)
-                }else{
-                    val v = a._1
-                    applyGate(a._2.remainingGates, v, false)
-                }
-            }
+            case step(()) + step(()) ⇒ step(()) + step(())
         }
     )
 
-    def applyGate(gates: List[Gate], v: QVec, fin: Boolean) =  // we need to re-release a step() every time otherwise there wont be enough in the pool 
+
+    def fx(){
+        Complex(1d, 0) * hScale
+    }
+    
+    def applyGate(gates: List[Gate], v: QVec, fin: Boolean, world: String) =  // we need to re-release a step() every time otherwise there wont be enough in the pool 
         gates.head match {
-            case X(t) => {
+            case _ @ X(t) => {
                 val nv = QVec(v.prop, v.v.updated(t, !v.v(t)))
                 if(fin){
-                    i(nv) + step(())
+                    println(s"Done after X: $world, with $nv")
+                    terminate(nv) + step(())
                 }else{
-                    e((nv, Circuit(gates.tail))) + step(())
+                    println(s"Applied X: $world, \n now: $nv")
+                    commit((nv, Circuit(gates.tail), world)) + step(())
                 }
             }
-            case H(t) => {
+            case _ @ H(t) => {
                 val sign = if (v.v(t)) {-1} else {1}
+                val ll = Complex(1d, 0)
                 if(fin){    
-                    i(QVec(sign * hScale * v.prop, v.v)) + i(QVec(hScale * v.prop, v.v.updated(t, !v.v(t)))) + step(())
+                    println(s"Done with H: $world")
+                    val nc1 = Complex(sign * hScale * v.prop.real, v.prop.imag)
+                    val nc2 = Complex(hScale * v.prop.real, v.prop.imag)
+                    terminate(QVec(nc1, v.v)) + terminate(QVec(nc2, v.v.updated(t, !v.v(t)))) + step(())
                 }else{
-                    e((QVec(sign * hScale * v.prop, v.v), Circuit(gates.tail))) + e((QVec(hScale * v.prop, v.v.updated(t, !v.v(t))), Circuit(gates.tail))) + step(()) + step(())
+                    val nc1 = Complex(sign * hScale * v.prop.real, v.prop.imag)
+                    val nc2 = Complex(hScale * v.prop.real, v.prop.imag)
+                    val qv1 = QVec(nc2, v.v)
+                    val qv2 = QVec(nc2, v.v.updated(t, !v.v(t)))
+                    val w1n = Random.nextInt()
+                    val w2n = Random.nextInt()
+                    println(s"Applied H: World $w1n: $qv1, World $w2n: $qv2")
+                    commit((qv1, Circuit(gates.tail), "World " + w1n)) + commit((qv2, Circuit(gates.tail), "World " + w2n)) + step(()) + step(())
                 }
             }
             case CX(c, t) => 
                 if(fin){
                     if(v.v(c)){
-                        i(QVec(v.prop, v.v.updated(t, !(v.v(t))))) + step(())
+                        println(s"Done after CX: $world, with ${QVec(v.prop, v.v.updated(t, !(v.v(t))))}")
+                        terminate(QVec(v.prop, v.v.updated(t, !(v.v(t))))) + step(())
                     }else{
-                        i(QVec(v.prop, v.v)) + step(())
+                        println(s"Done after CX: $world, with ${QVec(v.prop, v.v)}")
+                        terminate(QVec(v.prop, v.v)) + step(())
                     }
                 }else{
                     if(v.v(c)){
-                        e((QVec(v.prop, v.v.updated(t, !(v.v(t)))), Circuit(gates.tail))) + step(())
+                        val nv = QVec(v.prop, v.v.updated(t, !(v.v(t))))
+                        println(s"Applied CX: $world, \n now: $nv")
+                        commit((nv, Circuit(gates.tail), world)) + step(())
                     }else{
-                        e((QVec(v.prop, v.v) , Circuit(gates.tail))) + step(())
+                        val nv = QVec(v.prop, v.v)
+                        println(s"Applied CX: $world, \n now: $nv")
+                        commit((nv, Circuit(gates.tail), world)) + step(())
                     }
                 }
             case Swap(q1, q2) => 
@@ -145,9 +169,11 @@ object Cham2 extends App {
                 val firstOverwrite = v.v.updated(q2, source)
                 val second = firstOverwrite.updated(q1, target)
                 if(fin){
-                    i(QVec(v.prop, second)) + step(())
+                    println(s"Done after Swap: $world, with ${QVec(v.prop, second)}")
+                    terminate(QVec(v.prop, second)) + step(())
                 }else{
-                    e((QVec(v.prop, second), Circuit(gates.tail))) + step(())    
+                    println(s"Applied Swap: $world, \n now: ${QVec(v.prop, second)}")
+                    commit((QVec(v.prop, second), Circuit(gates.tail), world)) + step(())    
                 }
             case RZ(td, q) => 
                 val target = v.v(q)
@@ -163,71 +189,76 @@ object Cham2 extends App {
                 }
                 if(fin){
                     if(target){
-                        i(QVec(v.prop * new Complex(0d, 1d) * coeff , v.v)) + step(())
+                        println(s"Done after RZ: $world, with ${QVec(v.prop * new Complex(0d, 1d) * coeff , v.v)}")
+                        terminate(QVec(v.prop * new Complex(0d, 1d) * coeff , v.v)) + step(())
                     }else{
-                        i(QVec(v.prop * -1 * new Complex(0d, 1d) * coeff, v.v)) + step(())
+                        println(s"Done after RZ: $world, with ${QVec(v.prop * -1 * new Complex(0d, 1d) * coeff, v.v)}")
+                        terminate(QVec(v.prop * -1 * new Complex(0d, 1d) * coeff, v.v)) + step(())
                     }
                 }else{
                     if(target){
-                        e(QVec(v.prop * new Complex(0d, 1d) * coeff , v.v) , Circuit(gates.tail)) + step(())
+                        println(s"Applied RZ: $world, \n now: ${QVec(v.prop * new Complex(0d, 1d) * coeff , v.v)}")
+                        commit(QVec(v.prop * new Complex(0d, 1d) * coeff , v.v) , Circuit(gates.tail), world) + step(())
                     }else{
-                        e(QVec(v.prop * -1 * new Complex(0d, 1d) * coeff, v.v), Circuit(gates.tail)) + step(())
+                        println(s"Applied RZ: $world, \n now: ${QVec(v.prop * -1 * new Complex(0d, 1d) * coeff, v.v)}")
+                        commit(QVec(v.prop * -1 * new Complex(0d, 1d) * coeff, v.v), Circuit(gates.tail), world) + step(())
                     }
                 }
             case Rotate(td, q) => 
                 if(fin){
                     td match{
-                        case -2 => i(QVec(v.prop * 1/0.5, v.v)) + step(())
-                        case 2 => i(QVec(v.prop * 0.5, v.v)) + step(())
-                        case -4 => i(QVec(v.prop * 1/0.25, v.v)) + step(())
-                        case 4 => i(QVec(v.prop * 0.25, v.v)) + step(())
-                        case -8 => i(QVec(v.prop * 1/0.125, v.v)) + step(())
-                        case 8 => i(QVec(v.prop * 0.125, v.v)) + step(())
-                        case -16 => i(QVec(v.prop * 1/0.0625, v.v)) + step(())
-                        case 16 => i(QVec(v.prop * 0.0625, v.v)) + step(())
+                        case -2 => terminate(QVec(v.prop * 1/0.5, v.v)) + step(())
+                        case 2 => terminate(QVec(v.prop * 0.5, v.v)) + step(())
+                        case -4 => terminate(QVec(v.prop * 1/0.25, v.v)) + step(())
+                        case 4 => terminate(QVec(v.prop * 0.25, v.v)) + step(())
+                        case -8 => terminate(QVec(v.prop * 1/0.125, v.v)) + step(())
+                        case 8 => terminate(QVec(v.prop * 0.125, v.v)) + step(())
+                        case -16 => terminate(QVec(v.prop * 1/0.0625, v.v)) + step(())
+                        case 16 => terminate(QVec(v.prop * 0.0625, v.v)) + step(())
                     }
                 }else{
                     td match{
-                        case -2 => e(QVec(v.prop * 1/0.5, v.v), Circuit(gates.tail)) + step(())
-                        case 2 => e(QVec(v.prop * 0.5, v.v), Circuit(gates.tail)) + step(()) 
-                        case -4 => e(QVec(v.prop * 1/0.25, v.v), Circuit(gates.tail)) + step(())
-                        case 4 => e(QVec(v.prop * 0.25, v.v), Circuit(gates.tail)) + step(()) 
-                        case -8 => e(QVec(v.prop * 1/0.125, v.v), Circuit(gates.tail)) + step(())
-                        case 8 => e(QVec(v.prop * 0.125, v.v), Circuit(gates.tail)) + step(())
-                        case -16 => e(QVec(v.prop * 1/0.0625, v.v), Circuit(gates.tail)) + step(())
-                        case 16 => e(QVec(v.prop * 0.0625, v.v), Circuit(gates.tail)) + step(())
+                        case -2 => commit(QVec(v.prop * 1/0.5, v.v), Circuit(gates.tail), world) + step(())
+                        case 2 => commit(QVec(v.prop * 0.5, v.v), Circuit(gates.tail), world) + step(()) 
+                        case -4 => commit(QVec(v.prop * 1/0.25, v.v), Circuit(gates.tail), world) + step(())
+                        case 4 => commit(QVec(v.prop * 0.25, v.v), Circuit(gates.tail), world) + step(()) 
+                        case -8 => commit(QVec(v.prop * 1/0.125, v.v), Circuit(gates.tail), world) + step(())
+                        case 8 => commit(QVec(v.prop * 0.125, v.v), Circuit(gates.tail), world) + step(())
+                        case -16 => commit(QVec(v.prop * 1/0.0625, v.v), Circuit(gates.tail), world) + step(())
+                        case 16 => commit(QVec(v.prop * 0.0625, v.v), Circuit(gates.tail), world) + step(())
                     }
                 }
             case CRotate(c, td, q) => 
+                println(s"Applying CR gate in $world")
                 val target = v.v(c) 
                 if(target == true && v.v(q) == true){
                     if(fin){
                         td match{
-                            case -2 => i(QVec(v.prop * -0.5, v.v)) + step(())
-                            case 2 => i(QVec(v.prop * 0.5, v.v)) + step(())
-                            case -4 => i(QVec(v.prop * -0.25, v.v)) + step(())
-                            case 4 => i(QVec(v.prop * 0.25, v.v)) + step(())
-                            case -8 => i(QVec(v.prop * -0.125, v.v)) + step(())
-                            case 8 => i(QVec(v.prop * 0.125, v.v)) + step(())
-                            case -16 => i(QVec(v.prop * -0.0625, v.v)) + step(())
-                            case 16 => i(QVec(v.prop * 0.0625, v.v)) + step(())
+                            case -2 => terminate(QVec(v.prop * -0.5, v.v)) + step(())
+                            case 2 => terminate(QVec(v.prop * 0.5, v.v)) + step(())
+                            case -4 => terminate(QVec(v.prop * -0.25, v.v)) + step(())
+                            case 4 => terminate(QVec(v.prop * 0.25, v.v)) + step(())
+                            case -8 => terminate(QVec(v.prop * -0.125, v.v)) + step(())
+                            case 8 => terminate(QVec(v.prop * 0.125, v.v)) + step(())
+                            case -16 => terminate(QVec(v.prop * -0.0625, v.v)) + step(())
+                            case 16 => terminate(QVec(v.prop * 0.0625, v.v)) + step(())
                         }
                     }else{
                         td match{
-                            case -2 => e(QVec(v.prop * 1/0.5, v.v), Circuit(gates.tail)) + step(())
-                            case 2 => e(QVec(v.prop * 0.5, v.v), Circuit(gates.tail)) + step(())
-                            case -4 => e(QVec(v.prop * 1/0.25, v.v), Circuit(gates.tail)) + step(())
-                            case 4 => e(QVec(v.prop * 0.25, v.v), Circuit(gates.tail)) + step(())
-                            case -8 => e(QVec(v.prop * 1/0.125, v.v), Circuit(gates.tail)) + step(())
-                            case 8 => e(QVec(v.prop * 0.125, v.v), Circuit(gates.tail)) + step(())
-                            case -16 => e(QVec(v.prop * 1/0.0625, v.v), Circuit(gates.tail)) + step(())
-                            case 16 => e(QVec(v.prop * 0.0625, v.v), Circuit(gates.tail)) + step(())
+                            case -2 => commit(QVec(v.prop * 1/0.5, v.v), Circuit(gates.tail), world) + step(())
+                            case 2 => commit(QVec(v.prop * 0.5, v.v), Circuit(gates.tail), world) + step(())
+                            case -4 => commit(QVec(v.prop * 1/0.25, v.v), Circuit(gates.tail), world) + step(())
+                            case 4 => commit(QVec(v.prop * 0.25, v.v), Circuit(gates.tail), world) + step(())
+                            case -8 => commit(QVec(v.prop * 1/0.125, v.v), Circuit(gates.tail), world) + step(())
+                            case 8 => commit(QVec(v.prop * 0.125, v.v), Circuit(gates.tail), world) + step(())
+                            case -16 => commit(QVec(v.prop * 1/0.0625, v.v), Circuit(gates.tail), world) + step(())
+                            case 16 => commit(QVec(v.prop * 0.0625, v.v), Circuit(gates.tail), world) + step(())
                         }
                     }
                 }else{
                     if(fin){
-                        i(v) + step(())
-                    }else{ e(v, Circuit(gates.tail)) + step(())}
+                        terminate(v) + step(())
+                    }else{ commit(v, Circuit(gates.tail), world) + step(())}
                 }
             case ModGate(a, n) =>
                 val rv: Vector[Boolean] = v.v.slice(0, 4)
@@ -237,15 +268,16 @@ object Cham2 extends App {
                 val r = Math.floor(Math.pow(a, in) % n).toInt
                 val l = r.toBinaryString.toList.map(a => if(a == '1'){true}else{false})
                 if(fin){
-                    i(QVec(v.prop, rv ++ l)) + step(())
+                    terminate(QVec(v.prop, rv ++ l)) + step(())
                 }else{
-                    e(QVec(v.prop, rv ++ l), Circuit(gates.tail)) + step(())
+                    commit(QVec(v.prop, rv ++ l), Circuit(gates.tail), world) + step(())
                 }
+            case _ => println("Something Went Wrong, I Don't Recognize The Gate")
         }
     
 
     def scaleAndSample() = {
-        val x = e.logSoup.split("Molecules: ")(1)
+        val x = commit.logSoup.split("Molecules: ")(1)
         val each = x.split("r/P\\(QVec\\(")
         val pps = each.map(s => {
         val r = s.split(",\\)\\) * ")(0)
@@ -264,7 +296,10 @@ object Cham2 extends App {
         new BasicSampler(scaled.toList).sample()
     }
 
-    
+
+    val zz = QVec(Complex(1d, 0), Vector(false, false, false, false))
+    ///applyGate(List(H(0), X(0), CX(0,2), CX(1,2), CX(1,3)), zz, false, "World 0")
     // Example Simon Circuit 
-    e((QVec(1d, Vector(false, false, false, false)), Circuit(List(H(0), H(1), CX(0, 2), CX(0, 3), CX(1, 2), CX(1, 3), H(0), H(1))))) + step(()) + step(())
+    commit((QVec(Complex(1d, 0), Vector(false, false, false, false)), Circuit(List(H(0), X(0), CX(0,2), CX(1,2), CX(1,3))), "World 0")) + step(())
+    //e((QVec(1d, Vector(false, false, false, false)), Circuit(List(H(0), H(1), CX(0, 2), CX(0, 3), CX(1, 2), CX(1, 3), H(0), H(1))))) + step(()) + step(())
 }
