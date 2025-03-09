@@ -16,7 +16,7 @@ lazy val root = (project in file("."))
       "co.fs2" %% "fs2-core" % "3.9.3",
       "co.fs2" %% "fs2-io" % "3.9.3",
       "org.typelevel" %% "cats-effect" % "3.5.2",
-      "com.sinanspd" %% "qure" % "0.1.18-SNAPSHOT"
+      "com.sinanspd" %% "qure" % "0.1.20-SNAPSHOT"
     ),
     javaOptions ++= Seq(
       

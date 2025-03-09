@@ -1,0 +1,17 @@
+The test circuits are coded in the same file as the simulation code. Make sure you comment out all the tests you don't want to run, otherwise they will contribute results to the same pool. 
+
+You can build your circuits with the following gates 
+
+```
+ X, H, CX, Swap, RZ, RX, CRX 
+```
+
+If you need partial measurement/early measurement, you need to build a FakeSampler (see the Simon circuit example). 
+
+Run with
+
+```
+sbt run
+```
+
+The sampled outcome will be printed to STDOUT. You will also see RejectedExecutionException on STDOUT. This is normal. Once a result is sampled the pool is shutdown. `Chymyst`'s shutdown is immediate, not graceful. Thus any lingering computations are not cleaned up when the pool is shutdown and result in this exception. This doesn't impact our results. 

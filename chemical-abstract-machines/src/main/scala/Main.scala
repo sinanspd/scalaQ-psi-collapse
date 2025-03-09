@@ -1,4 +1,4 @@
-package example2 
+package com.sinanspd 
 
 import io.chymyst.jc._
 import org.slf4j.LoggerFactory
@@ -15,6 +15,8 @@ import com.sinanspd.qure.circuit._
 import com.sinanspd.qure.circuit.gates._
 import com.sinanspd.qure.circuit.circuitError._
 import com.sinanspd.qure.circuit.sampler._
+import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.FiniteDuration
 
 /// This implementation uses streaming to concurrently evaluate the circuit, then falls back
 // to CHAM to built interference. More efficient than the fully CHAM implementation 
@@ -49,7 +51,7 @@ class FakeShorSampler() extends Sampler{
 
 case class ModGate(a: Int, n: Int) extends Gate 
 
-object Main2 extends App {
+object Main extends App {
 
     val correctAnswers = List()  
     val concurrentInstances = 4 // Fill this out before running 
@@ -57,8 +59,10 @@ object Main2 extends App {
     val logger = LoggerFactory.getLogger("example.Main")
     val hScale : Double = 1.0 / Math.sqrt(2.0)
     val decider = new Random()
+    val terminateEarly = true;
 
     val r = m[QVec]
+    val tp = BlockingPool(32) 
 
     var med = false
 
@@ -99,20 +103,28 @@ object Main2 extends App {
     case class MultiDeferredMeasure(q: List[Int]) extends Gate 
     case class DeferredMeasurement(q: Int) extends Gate 
 
-    site (
+    site(tp) (
         go { case r(a) + r(b) ⇒ {
                 logger.debug(s"Possible Reaction between $a and $b"); 
                 if(a.v.sameElements(b.v)){ 
                     logger.debug("Molecules compatible. Reaction starting")
-                    val newQ = QVec(a.prop + b.prop, a.v)
-                    if(newQ.prop.real.abs >= 0.9){
+                    val newQ = QVec(Complex(a.prop.real + b.prop.real, a.prop.imag + b.prop.imag), a.v)
+                    if(newQ.v(0) && newQ.v(1) && newQ.v(2) && newQ.v(3) && newQ.v(4)){
+                        logger.debug(s"What I need $newQ")
+                    }
+                    if(newQ.prop.real.abs >= 0.1){
                         if(!med){
                             logger.info(s"Result $newQ")
                             med = true
-                            scaleAndSample()
+                            if(!terminateEarly){
+                                scaleAndSample()
+                            }else{
+                               println(s"---------------- RESULT -------- \n $newQ \n -------------------")
+                               tp.shutdownNow() 
+                            }
                         }
                         
-                    }else if(newQ.prop.real.abs == 0d){
+                    }else if(newQ.prop.real == 0.0){
                         logger.debug("Destrictive Interference")
                     }else{
                         logger.debug(s"Reaction finished, releasesing $newQ into the solution")
@@ -126,35 +138,59 @@ object Main2 extends App {
         }
     )
 
-    def build(c: Circuit, v: QVec)(implicit sampler: Sampler) : Unit = {
+    def build(c: Circuit, v: QVec)(implicit sampler: Sampler) : IO[Unit] = {
         c.remainingGates match{ 
             case Nil => 
+               //for simon 
                // val midresult = sampler.sample()
                 // if(v.v.takeRight(v.v.length / 2).sameElements(midresult)){
                 //     val newMolecule = QVec(v.prop, v.v.take(v.v.length / 2))
                 //     logger.debug("Releasing " + newMolecule)
                 //     r(newMolecule)
                 // }
-                val take = 4
-                val newMolecule = QVec(v.prop, v.v.take(take))
-                logger.debug("Releasing " + newMolecule)
-                r(newMolecule)
+                // val take = 4
+                // val newMolecule = QVec(v.prop, v.v.take(take))
+                //if(!v.v(0) & !v.v(1) & !v.v(2) & !v.v(3)){
+                // logger.info("Releasing " + v)
+                //IO.sleep(FiniteDuration(scala.util.Random.nextInt(40), scala.concurrent.duration.SECONDS)) *> 
+                //IO.pure(r(v))
+                //}
+
+                //for the very large grover with ancillas 
+                logger.info("Releasing " + QVec(v.prop, v.v.take(5)))
+                // This is needed for the giant grover instance otherwise the pool crashes 
+                IO.sleep(FiniteDuration(scala.util.Random.nextInt(40), scala.concurrent.duration.SECONDS)) *>  IO.pure(r(QVec(v.prop, v.v.take(5))))
             case x :: xs => 
                 x match {
                     case X(t) => 
                         val nv = QVec(v.prop, v.v.updated(t, !v.v(t)))
+                        logger.debug(s"Applied  X: $nv")
                         build(Circuit(xs), nv)
                     case H(t) => 
                         val sign = if (v.v(t)) -1 else 1
-                        val h1 = QVec(sign * hScale * v.prop, v.v)
-                        val h2 =  QVec(hScale * v.prop, v.v.updated(t, !v.v(t)))
-                        build(Circuit(xs), h1)
-                        build(Circuit(xs), h2)
+                        val nc1 = Complex(sign * hScale * v.prop.real, sign * hScale * v.prop.imag)
+                        val nc2 = Complex(hScale * v.prop.real, hScale * v.prop.imag) 
+                        val m1 = if(v.v(t)){QVec(nc1, v.v)}else{QVec(nc1, v.v.updated(t, !v.v(t)))}
+                        val m2 = if(v.v(t)){QVec(nc2, v.v.updated(t, !v.v(t)))}else{QVec(nc2, v.v)}
+                        logger.debug(s"Done with H: m1: $m1, m2: $m2")
+                        build(Circuit(xs), m1)
+                        build(Circuit(xs), m2)
                     case CX(c, t) => 
                         if(v.v(c)){
+                            logger.debug(s"Done after CX: with ${QVec(v.prop, v.v.updated(t, !(v.v(t))))}")
                             build(Circuit(xs), QVec(v.prop, v.v.updated(t, !(v.v(t)))))
                         }else{
+                            logger.debug(s"Done after CX: with ${QVec(v.prop, v.v)}")
                             build(Circuit(xs), QVec(v.prop, v.v))
+                        }
+                    case CCX(c1, c2, t) => 
+                        if(v.v(c1) && v.v(c2)){
+                            val nc = QVec(v.prop, v.v.updated(t, !(v.v(t))))
+                            logger.debug(s"Done after CCX: with $nc")
+                            build(Circuit(xs), nc)
+                        }else{
+                            logger.debug(s"Done after CCX: with $v")
+                            build(Circuit(xs), v)
                         }
                     case Swap(q1, q2) => 
                          val source = v.v(q1)
@@ -164,20 +200,26 @@ object Main2 extends App {
                          build(Circuit(xs), QVec(v.prop, second))
                     case RZ(td, q) => 
                         val target = v.v(q)
-                        val coeff = td match{
-                            case -2 => 1/0.5
-                            case 2 => 0.5
-                            case -4 => 1/0.25
-                            case 4 => 0.25
-                            case -8 => 1/0.125
-                            case 8 => 0.125
-                            case -16 => 1/0.0625
-                            case 16 => 0.0625
+                        val coefft = (c : Int) => c match{ //rough estimates are fine, estimates e^{+/- i theta / 2 } where theta = pi/n. We are passed n
+                            case -2 => Complex(0.7071, -0.7071) // e^{-i pi / 4}
+                            case 2 => Complex(0.7071, 0.7071) // e^{i pi / 4}
+                            case -4 => Complex(0.924, -0.383) // e^{-i pi / 8}
+                            case 4 => Complex(0.924, 0.383)  // e^{i pi / 8}
+                            case -8 => Complex(0.9808, -0.1951) // e^{-i pi / 16}
+                            case 8 => Complex(0.9808, 0.1951) // e^{i pi / 16}
+                            case -16 => Complex(0.9952, -0.0980) // e^{-i pi / 32}
+                            case 16 => Complex(0.9952, 0.0980) // e^{-i pi / 32}
                         }
                         if(target){
-                            build(Circuit(xs), QVec(v.prop * new Complex(0d, 1d) * coeff , v.v))
+                            val coeff = coefft(td)
+                            val ph = new Complex((v.prop.real * coeff.real) - (v.prop.imag * coeff.imag), (v.prop.real * coeff.imag) + (v.prop.imag * coeff.real))
+                            logger.debug(s"Done after RZ, with ${QVec(ph , v.v)}")
+                            build(Circuit(xs), QVec(ph , v.v))
                         }else{
-                            build(Circuit(xs), QVec(v.prop * -1 * new Complex(0d, 1d) * coeff, v.v))
+                            val coeff = coefft(-1 * td)
+                            val ph = new Complex((v.prop.real * coeff.real) - (v.prop.imag * coeff.imag), (v.prop.real * coeff.imag) + (v.prop.imag * coeff.real))
+                            logger.debug(s"Done after RZ, with ${QVec(ph, v.v)}")
+                            build(Circuit(xs), QVec(ph, v.v))
                         }
                     case Rotate(td, q) => 
                         td match{
@@ -190,23 +232,37 @@ object Main2 extends App {
                             case -16 => build(Circuit(xs), QVec(v.prop * 1/0.0625, v.v))
                             case 16 => build(Circuit(xs), QVec(v.prop * 0.0625, v.v))
                         }
-                    case CRotate(c, td, q) => 
+                    case CRotate(c, td, q) => //controlled RZ 
                         val target = v.v(c) 
-                        if(target == true && v.v(q) == true){
-                            td match{
-                                case -2 => build(Circuit(xs), QVec(v.prop * 1/0.5, v.v))
-                                case 2 => build(Circuit(xs), QVec(v.prop * 0.5, v.v))
-                                case -4 => build(Circuit(xs), QVec(v.prop * 1/0.25, v.v))
-                                case 4 => build(Circuit(xs), QVec(v.prop * 0.25, v.v))
-                                case -8 => build(Circuit(xs), QVec(v.prop * 1/0.125, v.v))
-                                case 8 => build(Circuit(xs), QVec(v.prop * 0.125, v.v))
-                                case -16 => build(Circuit(xs), QVec(v.prop * 1/0.0625, v.v))
-                                case 16 => build(Circuit(xs), QVec(v.prop * 0.0625, v.v))
+                        val coefft = (a : Int) => a match{ //rough estimates are fine, estimates e^{+/- i theta / 2 } where theta = pi/n. We are passed n
+                            case -2 => Complex(0.7071, -0.7071) // e^{-i pi / 4}
+                            case 2 => Complex(0.7071, 0.7071) // e^{i pi / 4}
+                            case -4 => Complex(0.924, -0.383) // e^{-i pi / 8}
+                            case 4 => Complex(0.924, 0.383)  // e^{i pi / 8}
+                            case -8 => Complex(0.9808, -0.1951) // e^{-i pi / 16}
+                            case 8 => Complex(0.9808, 0.1951) // e^{i pi / 16}
+                            case -16 => Complex(0.9952, -0.0980) // e^{-i pi / 32}
+                            case 16 => Complex(0.9952, 0.0980) // e^{-i pi / 32}
+                        }
+                        if(target){
+                            if(v.v(q)){
+                                val coeff = coefft(td)
+                                val ph = new Complex((v.prop.real * coeff.real) - (v.prop.imag * coeff.imag), (v.prop.real * coeff.imag) + (v.prop.imag * coeff.real))
+                                logger.debug(s"Done after CRZ, with ${QVec(ph , v.v)}")
+                                build(Circuit(xs), QVec(ph , v.v))
+                            }else{
+                                build(Circuit(xs), v)
                             }
                         }else{
                             build(Circuit(xs), v)
                         }
                 
+                    case CZ(ctrl, target) =>  
+                        if(v.v(ctrl) && v.v(target)){
+                            build(Circuit(xs), QVec(v.prop * -1, v.v))
+                        }else{
+                            build(Circuit(xs), v)
+                        }
                     case ModGate(a, n) =>
                         val rv: Vector[Boolean] = v.v.slice(0, 4)
                         val relevantbits = rv.map(a => if(a){1}else{0})
@@ -220,14 +276,18 @@ object Main2 extends App {
         }
     }
 
-    def scaleAndSample() = {
-        val x = r.logSoup.split("Molecules: ")(1)
-        val each = x.split("r/P\\(QVec\\(")
+ def scaleAndSample() = {
+        println("SCALING........")
+        // terminate.volatileValue
+        logger.debug(r.logSoup)
+        println(r.volatileValue)
+        val x = r.logSoup.split("Molecules:")(1)
+        val each = x.split("terminate/P\\(QVec\\(")
         val pps = each.map(s => {
-        val r = s.split(",\\)\\) * ")(0)
-        val p = r.split("\\+")(0).drop(1)
-        val v = r.split(",Vector").filter(u => u.contains("true") || u.contains("false"))
-        (p, v.toVector)
+            val r = s.split(",\\)\\) * ")(0)
+            val p = r.split("\\+")(0).drop(1)
+            val v = r.split(",Vector").filter(u => u.contains("true") || u.contains("false"))
+            (p, v.toVector)
         }).drop(1)
 
         val sqred = pps.map(x => (x._1.toDouble * x._1.toDouble, x._2)).toList
@@ -237,16 +297,22 @@ object Main2 extends App {
             val castToBool = x._2.map(b => b == "true")
             (x._1.toDouble * scale, castToBool)
         })
-        new BasicSampler(scaled.toList).sample()
+        println("pps+----")
+        scaled.foreach(println)
+        val res = new BasicSampler(scaled.toList).sample()
+        println("------------- RESULT -----------")
+        println(pps)
+        println(res)
     }
 
     // Example Simon Circuit
     val fourbitsimon = Circuit(List(H(0), H(1), CX(0, 2), CX(0, 3), CX(1, 2), CX(1, 3), H(0), H(1)))
     implicit val sampler = new FakeSimonSampler(fourbitsimon)
     val excs = QVec(1d, Vector(false, false, false, false))
-    Stream.eval(IO{build(fourbitsimon, excs)}).repeatN(concurrentInstances).compile.toVector.unsafeRunSync()
+    // Stream.eval(IO{build(fourbitsimon, excs)}).repeatN(concurrentInstances).compile.toVector.unsafeRunSync()
 
 
+    //%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // Example Shor Circuit
     //implicit val sampler = new FakeShorSampler()
     val _15bitshor = QVec(1d, Vector(false, false, false ,false ,false, false, false, false)) 
@@ -265,14 +331,20 @@ object Main2 extends App {
     CX(0, 2), CX(2, 0), CX(0, 2), H(0), RZ(-4, 0), CX(0, 1), RZ(4, 1), CX(0, 1), RZ(-8, 0), RZ(-4, 1), CX(0, 2), H(1), RZ(8, 2), RZ(-4, 1), CX(0,2),
     RZ(-8, 2), CX(1, 2), RZ(4, 2), CX(1, 2), RZ(-4, 2), H(2)))
 
+    //%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     //Example Grover Circuit 
     val _g0000 = QVec(1d, Vector(false, false, false, false))
     val grover0000 = Circuit(List(
-        H(0), H(1), H(2), H(3), X(0), X(1), X(2), X(3),
-        CRotate(0, 4, 3), CX(0, 1), CRotate(1, -4, 3), CX(0, 1), CRotate(1, 4, 3), CX(1, 2), CRotate(2, -4, 3), CX(0, 2), CRotate(2, 4, 3), CX(1, 2), CRotate(2, -4, 3), CX(0, 2), CRotate(2, 4, 3),
-        X(1), X(0), X(2), X(3), H(0), H(1), H(2), H(3), X(1), X(0), X(2), X(3),
-        CRotate(0, 4, 3), CX(0, 1), CRotate(1, -4, 3), CX(0, 1), CRotate(1, 4, 3), CX(1,2), CRotate(2, -4, 3), CX(0, 2), CRotate(2, 4 , 3), CX(1, 2), CRotate(2, -4, 3), CX(0, 2), CRotate(2, 4, 3),
+        H(0), H(1), H(2), H(3),
+        X(0), X(1), X(2), X(3),
+        CRotate(0, 2, 3), CX(0, 1), CRotate(1, -2, 3), CX(0, 1), CRotate(1, 2, 3), CX(1, 2), CRotate(2, -2, 3), CX(0, 2), CRotate(2, 2, 3), CX(1, 2), CRotate(2, -2, 3), CX(0, 2), CRotate(2, 2, 3),
+        X(1), X(0), X(2), X(3), H(0), H(1), H(2), H(3), //r2
+        X(1), X(0), X(2), X(3),
+        CRotate(0, 2, 3), CX(0, 1), CRotate(1, -2, 3), CX(0, 1), CRotate(1, 2, 3), CX(1,2), CRotate(2, -2, 3), CX(0, 2), CRotate(2, 2, 3), CX(1, 2), CRotate(2, -2, 3), CX(0, 2), CRotate(2, 2, 3),
         X(1), X(0), X(2), X(3), H(0), H(1), H(2), H(3)))
+
+
+    // Stream.eval(IO{build(grover0000, _g0000)}).compile.toVector.unsafeRunSync()
 
     val groverSAT011 = Circuit(List(H(0), H(1), H(2), X(2), CX(1, 2), Rotate(-4, 2), CX(0, 2), Rotate(4, 2), CX(1, 2),
     Rotate(4, 1), Rotate(-4, 2), CX(0, 2), CX(0, 1), Rotate(4, 2), CX(0,1), Rotate(4, 2), Rotate(4, 0), Rotate(-4, 1), X(2), CX(0,1),
@@ -284,4 +356,37 @@ object Main2 extends App {
     H(0), H(1), H(2), X(0), X(1), X(2), H(0), H(1), H(2)))
 
     val _gSAT001 = QVec(1d, Vector(false, false, false))
+
+    val gSAT111 = Circuit(List(H(0), H(1), H(2),
+     H(2), CCX(0, 1, 2), H(2), 
+     H(0), H(1), H(2), X(0), X(1), X(2), H(2), CCX(0, 1, 2), H(2), X(0), X(1), X(2), H(0), H(1), H(2), //r1
+     //H(0), H(1), H(2), X(0), X(1), X(2), H(2), CCX(0, 1, 2), H(2), X(0), X(1), X(2), H(0), H(1), H(2), 
+    ))
+
+    val _gSAT111 = QVec(1d, Vector(false, false, false))
+    // Stream.eval(build(gSAT111, _gSAT111)).compile.toVector.unsafeRunSync()
+
+
+    //Requires 40GB+ memory to run!!! run at your own risk 
+    val g511111 = Circuit(List(H(0), H(1), H(2), H(3), H(4),
+        CCX(0, 1, 5), CCX(1, 2, 6), CCX(5, 6, 7), CZ(7, 4), CCX(5, 6, 7), CCX(1, 2, 6), CCX(0, 1, 5),
+        H(0), H(1), H(2), H(3), H(4), X(0), X(1), X(2), X(3), X(4), 
+        CCX(0, 1, 5), CCX(1, 2, 6), CCX(5, 6, 7), CZ(7, 4), CCX(5, 6, 7), CCX(1, 2, 6), CCX(0, 1, 5),
+        X(0), X(1), X(2), X(3), X(4), H(0), H(1), H(2), H(3), H(4), //r1 
+         CCX(0, 1, 5), CCX(1, 2, 6), CCX(5, 6, 7), CZ(7, 4), CCX(5, 6, 7), CCX(1, 2, 6), CCX(0, 1, 5),
+        H(0), H(1), H(2), H(3), H(4), X(0), X(1), X(2), X(3), X(4), 
+        CCX(0, 1, 5), CCX(1, 2, 6), CCX(5, 6, 7), CZ(7, 4), CCX(5, 6, 7), CCX(1, 2, 6), CCX(0, 1, 5),
+        X(0), X(1), X(2), X(3), X(4), H(0), H(1), H(2), H(3), H(4), //r2
+        // CCX(0, 1, 5), CCX(1, 2, 6), CCX(5, 6, 7), CZ(7, 4), CCX(5, 6, 7), CCX(1, 2, 6), CCX(0, 1, 5),
+        // H(0), H(1), H(2), H(3), H(4), X(0), X(1), X(2), X(3), X(4), 
+        // CCX(0, 1, 5), CCX(1, 2, 6), CCX(5, 6, 7), CZ(7, 4), CCX(5, 6, 7), CCX(1, 2, 6), CCX(0, 1, 5),
+        // X(0), X(1), X(2), X(3), X(4), H(0), H(1), H(2), H(3), H(4) //r3
+        //,CCX(0, 1, 5), CCX(1, 2, 6), CCX(5, 6, 7), CZ(7, 4), CCX(5, 6, 7), CCX(1, 2, 6), CCX(0, 1, 5),
+        // H(0), H(1), H(2), H(3), H(4), X(0), X(1), X(2), X(3), X(4), 
+        // CCX(0, 1, 5), CCX(1, 2, 6), CCX(5, 6, 7), CZ(7, 4), CCX(5, 6, 7), CCX(1, 2, 6), CCX(0, 1, 5),
+        // X(0), X(1), X(2), X(3), X(4), H(0), H(1), H(2), H(3), H(4), //r4
+    ))
+
+     val _g511111 = QVec(1d, Vector(false, false, false, false, false, false, false ,false))
+     Stream.eval(build(g511111, _g511111)).compile.toVector.unsafeRunSync()
 }
